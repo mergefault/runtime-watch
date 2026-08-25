@@ -1,0 +1,94 @@
+name: Runtime Watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  runtime-watch:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - 20
+          - 22
+          - 24
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Preserve result
+        run: |
+          mkdir -p collected
+          cp results/latest.json "collected/node-${{ matrix.node }}.json"
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.node }}
+          path: collected/node-${{ matrix.node }}.json
+
+  publish:
+    needs: runtime-watch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: downloaded
+          merge-multiple: true
+
+      - name: Update results
+        run: |
+          mkdir -p results
+
+          for file in downloaded/*.json; do
+            node_version=$(basename "$file" .json)
+            cp "$file" "results/$node_version.json"
+          done
+
+      - name: Remove volatile timestamps
+        run: |
+          for file in results/node-*.json; do
+            node -e "
+              const fs = require('fs');
+              const file = process.argv[1];
+              const data = JSON.parse(fs.readFileSync(file));
+              delete data.generatedAt;
+              fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
+            " "$file"
+          done
+
+      - name: Commit changed results
+        run: |
+          if git diff --quiet -- results; then
+            echo "Runtime results unchanged."
+            exit 0
+          fi
+
+          git config user.name "runtime-watch[bot]"
+          git config user.email "runtime-watch[bot]@users.noreply.github.com"
+
+          git add results
+          git commit -m "chore: update runtime results"
+          git push
